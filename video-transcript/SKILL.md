@@ -1,23 +1,26 @@
 ---
 name: video-transcript
-description: Create a readable transcript of any video — a local video file OR a Bilibili URL/BV number — with timestamped, punctuated text and key-frame screenshots in one markdown document. Use whenever the user asks to transcribe, subtitle, or make a readable notes/summary document from a video referenced by file path, full Bilibili URL, or bare BV id (e.g. "BV1pb8o6yE8f"). For Bilibili inputs, first loads the bilibili-video-download skill to fetch the video.
+description: Create a readable transcript of any video — a local video file OR a Bilibili URL/BV number — with timestamped, punctuated, polished text and key-frame screenshots saved as image files in an assets/ subfolder next to the markdown. Use whenever the user asks to transcribe, subtitle, or make a readable notes/summary document from a video referenced by file path, full Bilibili URL, or bare BV id (e.g. "BV1pb8o6yE8f"). For Bilibili inputs, first loads the bilibili-video-download skill to fetch the video.
 ---
 
 # Video → Readable Transcript with Key Frames
 
-Produce a single markdown document: full transcript in the source language,
-punctuated and organized into a few **titled topic sections** (not one section per
-timestamp), with key-frame screenshots embedded next to the text they illustrate.
-Verified end-to-end on a 100-minute Mandarin course lecture (720P MP4) on a heavily
-firewalled network (2026-09).
+Produce a readable markdown transcript: the full talk in the source language,
+punctuated, **polished for readability** (fillers/stutters removed), and organized
+into a few **titled topic sections** (not one section per timestamp), with
+key-frame screenshots saved as image files in an `assets/` subfolder next to the
+markdown and referenced by relative path `assets/xxx.jpg`. **Never base64-embed
+images into the markdown.** Verified end-to-end on a 100-minute Mandarin course
+lecture (720P MP4) on a heavily firewalled network (2026-09).
 
-**File placement**: keep the video and the final `transcript.md` together in the
-deliverable directory (e.g. `L2_提示词工程/`); create **all intermediates in a /tmp
-scratch dir** (`WORKDIR=$(mktemp -d /tmp/vt_XXXX)` — audio.wav, keyframes,
-punctuated.json, sections.json). Only the final markdown goes to the deliverable
-dir. With `--outdir ... --embed-images` the screenshots are base64-embedded into the
-markdown, so the single file is fully self-contained and the scratch dir can be
-deleted right after verification.
+**File placement**: keep the video, the final `transcript.md`, and an `assets/`
+subfolder together in the deliverable directory (e.g. `L2_提示词工程/`);
+create **all intermediates in a /tmp scratch dir** (`WORKDIR=$(mktemp -d
+/tmp/vt_XXXX)` — audio.wav, keyframes, punctuated.json, sections.json). Only the
+final markdown and the referenced screenshot files in `assets/` go to the
+deliverable dir. After `--outdir ... --assets-subdir assets` the markdown quotes
+each screenshot by relative path `assets/xxx.jpg`, so the deliverable is the
+directory as a whole; the scratch dir can be deleted right after verification.
 
 ## Pipeline overview
 
@@ -26,8 +29,11 @@ deleted right after verification.
 3. **Extract key frames** (`scripts/extract_frames.py` → WORKDIR)
 4. **Transcribe + punctuate** (SenseVoiceSmall via funasr → WORKDIR)
 5. **Design topic sections** — read the transcript, write `WORKDIR/sections.json`
-6. **Assemble markdown** (`scripts/assemble_transcript.py` → deliverable dir)
-7. **Verify** (sections render, duration matches, text reaches the end; delete WORKDIR)
+6. **Polish the transcript** — remove fillers/stutters, fix ASR garbles (a
+   dedicated editing pass over the raw text, in WORKDIR)
+7. **Assemble markdown** (`scripts/assemble_transcript.py` → deliverable dir,
+   screenshots copied into `assets/`)
+8. **Verify** (sections render, images resolve, duration matches; delete WORKDIR)
 
 WORKDIR below always means the /tmp scratch dir; the deliverable dir is where the
 video lives. Use `scripts/` under this skill's base directory for steps 3 and 6. Do
@@ -177,43 +183,91 @@ Rules of thumb:
 - Match the video's actual structure: a lecture with clear parts gets one section
   per part; a monologue video might need only 3–5 sections total.
 
-## Step 6: Assemble the markdown document
+## Step 6: Polish the transcript (mandatory editing pass)
+
+Raw ASR output of a live lecture is full of trivial modal particles, stutters,
+and verbal debris that make it painful to read — e.g. one 100-min Mandarin
+lecture had ~400 呃, ~250 然后, ~180 对吧, plus stutters like 我我我 and
+sentences that trail off into 呃……. After transcription, run a **dedicated
+polishing pass over `punctuated.json`** before assembly:
+
+1. Work paragraph by paragraph (keep each paragraph's `start`/`end` timestamps
+   untouched — only edit `text`).
+2. **Remove** trivial modal particles and filler words when they carry no
+   meaning: 呃、嗯、啊、哈、那个、这个 (as pure fillers), 就是这样、对吧、
+   好不好、什么的话、OK/ok used as verbal padding, 转折填充 like
+   然后呢/呃然后.
+3. **Fix stutters and repetitions**: 我我我 → 我; 是一个呃这这是一个 → 这是一个.
+   Keep intentional repetition used for emphasis.
+4. **Keep** content words, the speaker's actual voice, technical terms,
+   rhetorical questions, humor, and sentence-final 吧/呢/啊 when they express
+   genuine mood (e.g. 算了吧, 好不好？as a real question to the audience).
+   A talk transcript should still sound like spoken language — do not rewrite
+   it into formal written prose or drop disfluencies so aggressively that the
+   flow becomes stilted.
+5. **Fix obvious ASR garbles** where the intended word is clear from context
+   (e.g. homophone errors like 通过制/通知制 if the slides/context make it
+   unambiguous); leave uncertain spots as-is rather than guessing.
+6. Optionally merge/trim empty sentences a paragraph shrinks to nothing —
+   delete such paragraphs entirely.
+
+Polishing is LLM editing work, not a regex find-replace: a script stripping
+every 啊/吧 would also destroy real questions and mood. Do it yourself in the
+response (or via a careful per-paragraph pass), write the result back to
+`WORKDIR/punctuated.json` (same schema), and sanity-check: timestamps
+unchanged, no paragraph lost or added, filler count (呃/嗯 etc.) near zero,
+text still reads as natural spoken language.
+
+## Step 7: Assemble the markdown document
 
 ```bash
 python3 <skill_dir>/scripts/assemble_transcript.py \
   --workdir WORKDIR --title "VIDEO TITLE" --course "COURSE/CONTEXT" \
   --creator "UPLOADER" --source-url "https://www.bilibili.com/video/BV..." \
-  --outdir "DELIVERABLE_DIR" --embed-images
+  --outdir "DELIVERABLE_DIR" --assets-subdir assets
 ```
 
 Reads `WORKDIR/punctuated.json` + `WORKDIR/sections.json`, writes
 `DELIVERABLE_DIR/transcript.md`: header with metadata, a short TOC of section titles
 with time ranges, then one `## <n>. <title> [start–end]` block per section containing
-the punctuated paragraphs and screenshots placed at their timestamps.
+the polished paragraphs and screenshots placed at their timestamps.
 
-Output modes: `--embed-images` base64-embeds the screenshots (single self-contained
-file — the right choice when WORKDIR is a throwaway /tmp dir and only transcript.md
-should survive). Without it, pass `--outdir` to copy the referenced keyframes next to
-the markdown; with neither, the markdown is written inside WORKDIR with relative
-image links.
+Image handling: `--outdir DIR --assets-subdir assets` copies the referenced
+keyframes into `DELIVERABLE_DIR/assets/` and quotes them in the markdown by
+relative path `assets/xxx.jpg` — this is the required mode; **never base64-embed
+images into the markdown** (a 100-min lecture embeds to a 6 MB unreadable file;
+image files stay diff-able, viewable, and load instantly). With `--outdir` and no
+`--assets-subdir` the images land in `DELIVERABLE_DIR/keyframes/` with
+`keyframes/...` links. With neither, the markdown is written inside WORKDIR with
+relative image links. `--embed-images` (base64 data URIs) exists only for legacy
+compatibility — do not use it.
 
-## Step 7: Verify
+## Step 8: Verify
 
 - Markdown renders: section headings and TOC present; `grep -c '^## ' transcript.md`
   matches the number of sections.
+- **Images resolve**: every `![...]` link points at an existing file under
+  `assets/` (relative path from the markdown), and the count matches the
+  referenced keyframes; `grep -c 'base64' transcript.md` is 0.
 - Last section's end timestamp ≈ the video duration (from step 1 metadata).
 - Read the first and last ~20 lines: text should start with real content and end
-  when the video ends (not cut off mid-sentence).
-- Delete the /tmp WORKDIR (`rm -rf WORKDIR`) — with `--embed-images` the deliverable
-  is fully self-contained, nothing in it is needed anymore. Also clean up any other
+  when the video ends (not cut off mid-sentence), and should read smoothly —
+  no 呃/嗯/我我我 left.
+- Delete the /tmp WORKDIR (`rm -rf WORKDIR`) — the deliverable dir holds
+  everything needed (markdown + assets). Also clean up any other
   temp dirs from the download step.
 
 ## Common pitfalls (all hit in practice)
 
 - **Transcription produces no punctuation** → you used raw Whisper/sentence_info
   output; run the ct-punc grouping step (Step 4).
+- **Transcript is unreadable: 呃/嗯/我我我 everywhere** → you skipped Step 6;
+  polish the paragraphs before assembly. Don't fix it with a global regex —
+  fillers must be judged in context by an editing pass.
 - **Transcript organized into dozens of tiny timestamp sections** → you skipped
   Step 5; write a `sections.json` with a few titled topic sections first.
+- **Markdown ballooned to megabytes and won't open in editors** → the images
+  were base64-embedded; use `--assets-subdir assets` file links instead.
 - **`FileNotFoundError: 'ffmpeg'` from a transcription tool** → symlink the
   imageio-ffmpeg binary onto PATH (Step 2).
 - **`load_npz ... must be a zip file`** when loading a local Whisper model →

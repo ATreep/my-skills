@@ -5,7 +5,7 @@ Usage:
   python3 assemble_transcript.py --workdir DIR --title T [--course C] [--creator U]
       [--creator-label 作者] [--source-url URL] [--sections sections.json]
       [--transcript punctuated.json] [--keyframes keyframes]
-      [--out transcript.md] [--outdir DIR] [--embed-images]
+      [--out transcript.md] [--outdir DIR] [--assets-subdir assets]
 
 Expects (relative to DIR):
   punctuated.json  [{"start": ms, "end": ms, "text": "..."}, ...] — transcription step
@@ -21,16 +21,19 @@ Output modes:
   --outdir DIR     writes --out into DIR and copies the referenced keyframes into
                    DIR/keyframes/ — final deliverable next to the video, when you
                    want to keep the raw frames too.
-  --outdir DIR --embed-images
-                   writes --out into DIR with screenshots base64-embedded as data
-                   URIs — fully self-contained single file, nothing else copied.
-                   Use when WORKDIR is a throwaway /tmp scratch dir.
+  --outdir DIR --assets-subdir assets
+                   writes --out into DIR and copies the referenced keyframes into
+                   DIR/assets/, referencing them by relative path assets/xxx.jpg.
+                   This is the required deliverable mode: image files in an assets/
+                   subfolder, NEVER base64-embedded into the markdown. (Base64 data
+                   URI embedding was removed on purpose — a 100-min lecture balloons
+                   to a 6 MB markdown that no editor or diff tool handles.)
 
 The document: metadata header, short TOC of section titles, and one
 "## <n>. <title> [start–end]" block per section containing the punctuated
 paragraphs and the keyframes whose timestamps fall inside that section.
 """
-import argparse, base64, bisect, glob, json, os, re, shutil, sys
+import argparse, bisect, glob, json, os, re, shutil, sys
 
 
 def fmt(sec: float) -> str:
@@ -60,10 +63,12 @@ def main():
     ap.add_argument("--outdir", default="",
                     help="write the final markdown here (deliverable location, e.g. "
                          "next to the video) instead of inside workdir")
-    ap.add_argument("--embed-images", action="store_true",
-                    help="embed screenshots as base64 data URIs instead of file links "
-                         "(self-contained output; use with --outdir when workdir is a "
-                         "throwaway /tmp scratch dir)")
+    ap.add_argument("--assets-subdir", default="",
+                    help="with --outdir: copy referenced keyframes into "
+                         "OUTDIR/<assets-subdir>/ and link them by relative path "
+                         "<assets-subdir>/xxx.jpg (e.g. --assets-subdir assets). "
+                         "Image files in an assets folder are the required "
+                         "deliverable format; base64 embedding is not supported")
     a = ap.parse_args()
     os.chdir(a.workdir)
 
@@ -135,26 +140,19 @@ def main():
 
     # keyframe link for each shot, relative to where the markdown will live
     used = {p for v in shot_by_para.values() for _, p in v}
-    embed = a.embed_images
-    link = {}
-    for t, p in shots:
-        if p not in used:
-            continue
-        if embed:
-            data = base64.b64encode(open(p, "rb").read()).decode()
-            mime = "image/png" if p.endswith(".png") else "image/jpeg"
-            link[p] = f"data:{mime};base64,{data}"
-        else:
-            link[p] = f"{a.keyframes}/{os.path.basename(p)}"
+    if a.assets_subdir and not a.outdir:
+        raise SystemExit("--assets-subdir requires --outdir")
+    subdir = a.assets_subdir or a.keyframes  # link prefix == copy destination name
+    link = {p: f"{subdir}/{os.path.basename(p)}" for p in shots if p in used}
 
     if a.outdir:
         os.makedirs(a.outdir, exist_ok=True)
         out_path = os.path.join(a.outdir, a.out)
-        if not embed:  # deliver referenced keyframes alongside the markdown
-            dst = os.path.join(a.outdir, a.keyframes)
-            os.makedirs(dst, exist_ok=True)
-            for p in used:
-                shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
+        # deliver referenced keyframes alongside the markdown
+        dst = os.path.join(a.outdir, subdir)
+        os.makedirs(dst, exist_ok=True)
+        for p in used:
+            shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
     else:
         out_path = a.out
 
@@ -165,7 +163,7 @@ def main():
     if a.source_url: meta.append(f"**来源**: {a.source_url}")
     meta.append(f"**时长**: {fmt(paras[-1]['end'])}")
     L.append("> " + "  \n> ".join(meta)); L.append("")
-    L.append("*文字稿为自动转写并加标点，可能有少量识别错误；截图为关键帧采样。*"); L.append("")
+    L.append("*文字稿为自动转写、加标点并润色（去除口语填充词与口吃重复），可能仍有少量识别错误；截图为关键帧采样。*"); L.append("")
 
     L.append("## 目录")
     for i, sp in enumerate(sec_paras):
@@ -188,7 +186,7 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(L))
     print(f"wrote {out_path}: {len(secs)} titled sections, {len(paras)} paragraphs, "
-          f"{len(used)} screenshots{' (embedded)' if embed else ''}")
+          f"{len(used)} screenshots in {subdir}/")
 
 
 if __name__ == "__main__":
